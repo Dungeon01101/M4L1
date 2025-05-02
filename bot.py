@@ -1,70 +1,163 @@
-from telebot import TeleBot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from logic import *
-import schedule
-import threading
-import time
-from config import *
 
-bot = TeleBot(API_TOKEN)
+import telebot
+from telebot import types
+from db_manager import DBManager  # Убедитесь, что файл называется db_manager.py
 
-def gen_markup(id):
-    markup = InlineKeyboardMarkup()
-    markup.row_width = 1
-    markup.add(InlineKeyboardButton("Получить!", callback_data=id))
-    return markup
+# Замените на свой токен
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
+# Создаем бота
+bot = telebot.TeleBot(BOT_TOKEN)
 
-    prize_id = call.data
-    user_id = call.message.chat.id
+# Создаем экземпляр DBManager
+db = DBManager()
 
-    img = manager.get_prize_img(prize_id)
-    with open(f'img/{img}', 'rb') as photo:
-        bot.send_photo(user_id, photo)
-
-
-def send_message():
-    prize_id, img = manager.get_random_prize()[:2]
-    manager.mark_prize_used(prize_id)
-    hide_img(img)
-    for user in manager.get_users():
-        with open(f'hidden_img/{img}', 'rb') as photo:
-            bot.send_photo(user, photo, reply_markup=gen_markup(id = prize_id))
-        
-
-def shedule_thread():
-    schedule.every().minute.do(send_message) # Здесь ты можешь задать периодичность отправки картинок
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+# --- Хендлеры для обычных пользователей ---
 
 @bot.message_handler(commands=['start'])
-def handle_start(message):
-    user_id = message.chat.id
-    if user_id in manager.get_users():
-        bot.reply_to(message, "Ты уже зарегестрирован!")
+def start(message):
+    db.add_user(message.from_user.id, message.from_user.username)  # Добавляем пользователя в БД
+    bot.reply_to(message, f"Привет, {message.from_user.username}! Твой баланс: {db.get_user_balance(message.from_user.id)} монет.")
+
+@bot.message_handler(commands=['balance'])
+def get_balance(message):
+    balance = db.get_user_balance(message.from_user.id)
+    bot.reply_to(message, f"Твой баланс: {balance} монет.")
+
+@bot.message_handler(commands=['bonus'])
+def show_bonus_options(message):
+    # TODO: Реализуйте логику предоставления бонусов за монеты.
+    bot.reply_to(message, "В разработке...")
+
+# --- Хендлеры для администраторов ---
+# Проверка на админа
+def is_admin(message):
+    return db.is_admin(message.from_user.id)
+
+# Декоратор для проверки на админа
+def admin_required(func):
+    def wrapper(message):
+        if is_admin(message):
+            func(message)
+        else:
+            bot.reply_to(message, "У вас нет прав администратора.")
+    return wrapper
+
+@bot.message_handler(commands=['admin'])
+@admin_required
+def admin_panel(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
+    item1 = types.KeyboardButton("Настройки бота")
+    item2 = types.KeyboardButton("Добавить картинку")
+    item3 = types.KeyboardButton("Список картинок")
+    markup.add(item1, item2, item3)
+
+    bot.send_message(message.chat.id, "Добро пожаловать в админ-панель!", reply_markup=markup)
+
+
+@bot.message_handler(func=lambda message: message.text == "Настройки бота")
+@admin_required
+def bot_settings(message):
+  markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
+  item1 = types.KeyboardButton("Изменить период отправки")
+  item2 = types.KeyboardButton("Изменить размер бонусов")
+  back = types.KeyboardButton("Назад")
+  markup.add(item1, item2, back)
+  bot.send_message(message.chat.id, "Выберите настройку:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == "Изменить период отправки")
+@admin_required
+def change_period(message):
+  # TODO: Реализовать логику изменения периода отправки сообщений.
+  bot.send_message(message.chat.id, "В разработке...")
+
+@bot.message_handler(func=lambda message: message.text == "Изменить размер бонусов")
+@admin_required
+def change_bonus_size(message):
+    # TODO: Реализовать логику изменения размера бонусов.
+    bot.send_message(message.chat.id, "В разработке...")
+
+
+@bot.message_handler(func=lambda message: message.text == "Добавить картинку", content_types=['text'])
+@admin_required
+def ask_for_image(message):
+    bot.send_message(message.chat.id, "Отправьте изображение, которое хотите добавить.")
+    bot.register_next_step_handler(message, add_image_step)
+
+@admin_required
+def add_image_step(message):
+    if message.content_type == 'photo':
+        file_id = message.photo[-1].file_id  # Берем самое большое разрешение
+        db.add_image(file_id)
+        bot.reply_to(message, "Изображение добавлено! Вы можете добавить описание, отправив его следующим сообщением (или пропустить).")
+        bot.register_next_step_handler(message, save_image_description, file_id)
     else:
-        manager.add_user(user_id, message.from_user.username)
-        bot.reply_to(message, """Привет! Добро пожаловать! 
-Тебя успешно зарегистрировали!
-Каждый час тебе будут приходить новые картинки и у тебя будет шанс их получить!
-Для этого нужно быстрее всех нажать на кнопку 'Получить!'
-
-Только три первых пользователя получат картинку!)""")
-        
+        bot.reply_to(message, "Пожалуйста, отправьте изображение.")
 
 
-def polling_thread():
-    bot.polling(none_stop=True)
+@admin_required
+def save_image_description(message, file_id):
+    if message.content_type == 'text':
+        db.cursor.execute("UPDATE admin_images SET description = ? WHERE file_id = ?", (message.text, file_id))
+        db.conn.commit()
+        bot.reply_to(message, "Описание добавлено!")
+    else:
+        bot.reply_to(message, "Описание не добавлено.")
 
+    # Вернуться в админ-панель
+    admin_panel(message)
+
+
+@bot.message_handler(func=lambda message: message.text == "Список картинок")
+@admin_required
+def list_images(message):
+    images = db.get_all_images()
+    if images:
+        for image_id, file_id, description in images:
+            bot.send_photo(message.chat.id, file_id, caption=f"ID: {image_id}, Описание: {description}")
+    else:
+        bot.reply_to(message, "Нет добавленных изображений.")
+
+    # Вернуться в админ-панель
+    admin_panel(message)
+
+
+@bot.message_handler(commands=['add_admin'])
+@admin_required
+def add_admin_command(message):
+    if len(message.text.split()) > 1:
+        try:
+            user_id_to_add = int(message.text.split()[1])
+            db.add_admin(user_id_to_add)
+            bot.reply_to(message, f"Пользователь с ID {user_id_to_add} теперь администратор.")
+        except ValueError:
+            bot.reply_to(message, "Неверный формат ID пользователя.")
+    else:
+        bot.reply_to(message, "Укажите ID пользователя, которого нужно добавить в администраторы.")
+
+@bot.message_handler(commands=['remove_admin'])
+@admin_required
+def remove_admin_command(message):
+    if len(message.text.split()) > 1:
+        try:
+            user_id_to_remove = int(message.text.split()[1])
+            db.remove_admin(user_id_to_remove)
+            bot.reply_to(message, f"Пользователь с ID {user_id_to_remove} больше не администратор.")
+        except ValueError:
+            bot.reply_to(message, "Неверный формат ID пользователя.")
+    else:
+        bot.reply_to(message, "Укажите ID пользователя, которого нужно удалить из администраторов.")
+
+@bot.message_handler(func=lambda message: message.text == "Назад")
+@admin_required
+def back_to_admin_panel(message):
+    admin_panel(message)
+
+# --- Запуск бота ---
 if __name__ == '__main__':
-    manager = DatabaseManager(DATABASE)
-    manager.create_tables()
+    #  Сразу добавляем себя в админы (замените YOUR_TELEGRAM_USER_ID на свой ID)
+    db.add_admin(YOUR_TELEGRAM_USER_ID) # Замените на ваш ID
+    bot.infinity_polling()
 
-    polling_thread = threading.Thread(target=polling_thread)
-    polling_shedule  = threading.Thread(target=shedule_thread)
-
-    polling_thread.start()
-    polling_shedule.start()
+# После того, как программа отработала, закрываем соединение с базой данных
+db.close()
